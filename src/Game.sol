@@ -1,135 +1,115 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.27;
+pragma solidity 0.8.20;
 
-import "../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import "./GamePositions.sol";
 
 contract Game {
     struct PlayerBet {
-        string optionName; // String option name
+        string optionName;
         uint amount;
     }
 
     struct GameStatus {
         address resolver;
-        ERC20 token;
         uint40 expectedEnd;
         bool resolved;
         string winningOption;
-        mapping(string => uint) optionTotalStakes; // Total stake for each option (by string)
+        mapping(string => uint) optionTotalStakes;
     }
 
     GameStatus public status;
     mapping(address => PlayerBet) public playerBets;
     mapping(address => bool) public hasClaimedReward;
     GamePositions public positions;
-    string[] public options; // List of option names (e.g., ["yes", "no"])
+    string[] public options;
 
     event OptionPicked(address indexed player, string optionName, uint amount);
     event GameResolved(string winningOption);
     event RewardClaimed(address indexed player, uint amount);
 
-    error GameOptionDontExist();
+    error GameOptionDoesNotExist();
     error GameAlreadyResolved();
-    error InvalidOption();
+    error UnauthorizedResolver();
+    error InvalidWinningOption();
     error NoBetPlaced();
     error RewardAlreadyClaimed();
     error GameNotFinished();
 
     constructor(
         address resolver,
-        ERC20 token,
-        uint40 expectedEnd,
-        string[] memory optionNames
+        uint40 expectedEnd
     ) {
-        // Deploy the ERC1155 token contract for position tokens
         positions = new GamePositions();
 
-        // Initialize the game status
         status.resolver = resolver;
-        status.token = token;
         status.expectedEnd = expectedEnd;
         status.resolved = false;
 
-        // Set up options based on the provided array of strings
-        for (uint i = 0; i < optionNames.length; i++) {
-            options.push(optionNames[i]); // Store the option name
-            status.optionTotalStakes[optionNames[i]] = 0; // Initialize total stakes for this option to 0
-        }
+        options = ["Yes", "No"];
+        status.optionTotalStakes["Yes"] = 0;
+        status.optionTotalStakes["No"] = 0;
     }
 
-    // Function for players to pick an option and stake tokens
-    function pickOption(string memory optionName, uint amount) external {
-        if (bytes(optionName).length == 0 || status.optionTotalStakes[optionName] == 0) revert GameOptionDontExist();
-        if (block.timestamp > status.expectedEnd) revert GameNotFinished(); // Prevent betting after the game ends
+    function pickOption(string memory optionName) external payable {
+        if (!_isValidOption(optionName)) revert GameOptionDoesNotExist();
+        if (block.timestamp > status.expectedEnd) revert GameNotFinished();
 
-        // Transfer the ERC20 tokens from the player to the game contract
-        status.token.transferFrom(msg.sender, address(this), amount);
-
-        // Mint ERC1155 position tokens (for the selected option) to the player
+        uint amount = msg.value;
         positions.mint(msg.sender, optionName, amount);
 
-        // Update the player's bet and the total staked for the selected option
         playerBets[msg.sender] = PlayerBet(optionName, amount);
         status.optionTotalStakes[optionName] += amount;
 
         emit OptionPicked(msg.sender, optionName, amount);
     }
 
-    // Function for the resolver to resolve the game by passing the winning option as a string
     function resolveGame(string memory winningOption) external {
-        if (msg.sender != status.resolver) revert InvalidOption();
-
+        if (msg.sender != status.resolver) revert UnauthorizedResolver();
         if (status.resolved) revert GameAlreadyResolved();
-        if (bytes(winningOption).length == 0 || status.optionTotalStakes[winningOption] == 0) revert InvalidOption();
+        if (!_isValidOption(winningOption)) revert InvalidWinningOption();
 
         status.resolved = true;
         status.winningOption = winningOption;
 
-        // Burn losing tokens for all players
-        for (uint i = 0; i < options.length; i++) {
-            if (keccak256(bytes(options[i])) != keccak256(bytes(winningOption))) {
-                positions.burn(address(this), options[i], status.optionTotalStakes[options[i]]);
-            }
-        }
+        string memory losingOption = keccak256(bytes(winningOption)) == keccak256(bytes("Yes")) ? "No" : "Yes";
+        positions.burn(address(this), losingOption, status.optionTotalStakes[losingOption]);
 
         emit GameResolved(winningOption);
     }
 
-    // Function for players to claim rewards after the game is resolved
     function claimReward() external {
         if (!status.resolved) revert GameNotFinished();
         PlayerBet storage playerBet = playerBets[msg.sender];
         if (playerBet.amount == 0) revert NoBetPlaced();
         if (hasClaimedReward[msg.sender]) revert RewardAlreadyClaimed();
 
-        // Check if the player's bet was on the winning option
         if (keccak256(bytes(playerBet.optionName)) != keccak256(bytes(status.winningOption))) {
             hasClaimedReward[msg.sender] = true;
             emit RewardClaimed(msg.sender, 0);
-            return; // Player bet on the wrong option, no reward
+            return;
         }
 
-        // Calculate the player's reward based on their stake and the total staked in the winning option
-        uint reward = (playerBet.amount * status.token.balanceOf(address(this))) / status.optionTotalStakes[status.winningOption];
+        uint reward = (playerBet.amount * address(this).balance) / status.optionTotalStakes[status.winningOption];
         hasClaimedReward[msg.sender] = true;
-        status.token.transfer(msg.sender, reward);
+        payable(msg.sender).transfer(reward);
 
         emit RewardClaimed(msg.sender, reward);
     }
 
-    // Helper function to check if the game has ended
     function hasGameEnded() public view returns (bool) {
         return block.timestamp > status.expectedEnd;
     }
 
-    // Helper function to get the total pool of tokens staked in the game
     function getTotalPool() public view returns (uint) {
-        return status.token.balanceOf(address(this));
+        return address(this).balance;
     }
 
-    // Function to retrieve all option names
     function getOptionNames() external view returns (string[] memory) {
         return options;
+    }
+
+    function _isValidOption(string memory optionName) internal pure returns (bool) {
+        return keccak256(bytes(optionName)) == keccak256(bytes("Yes")) || 
+               keccak256(bytes(optionName)) == keccak256(bytes("No"));
     }
 }

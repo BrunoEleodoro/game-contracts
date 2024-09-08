@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.27;
+pragma solidity 0.8.20;
 
 import "../lib/openzeppelin-contracts/contracts/token/ERC1155/ERC1155.sol";
 
